@@ -1,33 +1,82 @@
-# NEUROWEAVE 8
+# NEUROWEAVE
 
 Цифровой спайковый организм: **вычисление = память = обучение** в одном
 контуре. Этот репозиторий целиком посвящён проекту NEUROWEAVE.
 
-Синтез канона `NEUROWEAVE_SPIKER_единый_концепт_v4.0.pdf` (включая все
-патчи CHANGELOG v4.0.1), инженерной базы `neuroweave_v6` и
-восстановленной `neuroweave_v7restored` — собран заново как ламинарный
-организм v8.
+`neuroweave9` — **v9.0 «Cortex» (The Great Merge)**: гибрид измеренного
+пайплайна обучения Spiker v6.0 и инноваций NEUROWEAVE 8.
+`neuroweave8` — ламинарный организм v8 (синтез канона v4.0/v4.0.1,
+инженерной базы `neuroweave_v6` и восстановленной `neuroweave_v7restored`).
 
 ## Быстрый старт
 
 ```bash
 pip install torch pytest          # CPU-режим поддерживается из коробки
+
+# v9 «Cortex» — обучение на TinyStories методом «одной большой партии»
+python -m neuroweave9.train_cortex --max-stories 200 --holdout 40 \
+    --phase1-epochs 4 --phase2-epochs 10 --max-vocab-size 128
+
+# v8 — демо жизненного цикла и бенчмарк
 python -m neuroweave8.main --preset poc --steps 200 --batch 4
-python -m neuroweave8.bench --preset poc --ticks 200 --batch 4
 python -m neuroweave8.bench --sweep --ticks 40   # свип масштабирования
-pytest tests/                     # 28 тестов: ядро + организм + пайплайн + скейлинг
+
+pytest tests/                     # 36 тестов: v8 ядро/организм/скейлинг + v9 cortex
 ```
 
 ## Состав репозитория
 
 | Путь | Содержимое |
 |---|---|
-| `neuroweave8/` | **Рабочая версия v8** — ламинарные колонки, гиппокамп, мета-контроллер нейромодуляции, Global Workspace, θ-γ рабочая память + фазовый VSA, Corpus Callosum, цикл сон/бодрствование, EWC, структурная пластичность. Полная документация — `neuroweave8/README.md` |
-| `tests/` | Тест-пайплайн: ядро (нейрон/синапс/колонка/шина/WS/VSA), организм (behave/sleep/telemetry), пайплайн (адаптация к инверсии, консолидация, EWC, EFE-внимание, WM-биндер, разреженный путь) |
+| `neuroweave9/` | **v9.0 «Cortex»** — ламинарные колонки A/B/C + θ-γ синхронизация полушарий (binder+VSA), Лапласова память и базальные ганглии Spiker, пайплайн «одной большой партии», EWC-контроль памяти, сон с реплеем. `train_cortex.py` — обучение + генерация |
+| `neuroweave8/` | **v8** — ламинарные колонки, гиппокамп, мета-контроллер нейромодуляции, Global Workspace, θ-γ рабочая память + фазовый VSA, Corpus Callosum, цикл сон/бодрствование, EWC, структурная пластичность, int8, NeuroSystem. Документация — `neuroweave8/README.md` |
+| `tests/` | Тест-пайплайн: v8 ядро (нейрон/синапс/колонка/шина/WS/VSA), организм, пайплайн, скейлинг + **v9 cortex** (контракт Spiker, Фаза 1, EWC, синк, сон, фасад) |
+| `data/` | TinyStories corpus (4000 историй) для пайплайна v9 |
 | `neuroweave_v6/` | Эталон v6: точный экспоненциальный интегратор, проводимостная GABA, KCC2 |
 | `neuroweave_v7restored/` | Восстановленная v7 после потери — база архитектуры |
 | `docs/` | Аудит v6 и science-grounding заметки |
 | `concept_v4.txt`, `NEUROWEAVE_SPIKER_единый_концепт_v4.0.pdf` | Каноническая спецификация |
+
+## v9.0 «Cortex» — The Great Merge
+
+Из **Spiker** взяты математически проверенные компоненты (`ARCHITECTURE_REVIEW`):
+- метод **«одной большой партии»**: корпус = один батч, один
+  `optimizer.step()` на эпоху, экономный `backward(1/seq_len)` — тот же
+  градиент при памяти O(1);
+- **LaplaceTimingBank** — геометрический спектр экспоненциальных
+  интеграторов (клетки времени, Shankar & Howard), мультимасштабный
+  контекст декодера;
+- **BasalGangliaGate** — дрифт-диффузионная модель решения (Go/No-Go +
+  STN): темп эмиссии токенов с нейрохимическим порогом (5-HT/ACh);
+- **ThetaGammaOscillator** — PAC-гейт окна Corpus Callosum;
+- асимметрия полушарий: левое быстрое (tau_m=8, σ=0.001), правое медленное
+  (tau_m=35, σ=0.05); изолированная Фаза 1 с каузальной историей
+  (горизонт delta_t=3), EWC-финализация и контроль `L_A` до/после сна.
+
+Из **NEUROWEAVE 8** взяты инновационные компоненты:
+- **LaminarColumn** вместо плоской Zone: L4→L2/3→L5→L6 + PV/SST,
+  дендритное плато L5 = AND-гейт «вход И контекст», SST контролирует
+  апикальный ток, PV — k-WTA;
+- **HemisphereSync** (`sync.py`): обе полушарии пишут в общий
+  `ThetaGammaBinder` на соседние γ-слоты, а `PhaseVSA` связывает их коды
+  в один межполушарный фрейм — синхронизация по структуре, не по сигналу.
+  Реляционный канал `frame.real` идёт декодеру;
+- NeuroChemistry + MetaController, CreditPipeline (событийный DA,
+  Tag-and-Capture), Hippocampus DG→CA3→CA1 с приоритизированным реплеем,
+  SleepProtocol, EWC, StructuralPlasticity, int8-квантизация, CortexSystem.
+
+### Структура `neuroweave9/`
+
+- `memory/laplace.py` — LaplaceTimingBank (порт)
+- `action/basal_ganglia.py` — BasalGangliaGate (порт)
+- `modulation/pacemaker.py` — ThetaGammaOscillator (порт)
+- `cortex/sync.py` — HemisphereSync: общий θ-γ биндер + VSA-фрейм
+- `cortex/organism.py` — CortexOrganism (контракт совместим с Spiker)
+- `learning/phase1.py` — Phase1ColumnTrainer + CortexEWC
+- `readout.py` — LaplaceContextReadout (+ канал синхронизации)
+- `train_cortex.py` — пайплайн «одной большой партии»
+- `system.py` — CortexSystem (boot/step/sleep/quantize/save/load)
+- `data.py` — загрузчики TinyStories
 
 ## Ключевые уровни v8
 
