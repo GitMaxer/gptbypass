@@ -73,6 +73,23 @@ class StatefulSynapse(nn.Module):
         self.register_buffer("dec_post", torch.exp(torch.tensor(-dt / cfg.tau_post)))
         self.register_buffer("dec_elig", torch.exp(torch.tensor(-dt / cfg.tau_elig)))
 
+        # Каскад метапластичности Фузи (порт Spiker v6.0): часто модифицируемые
+        # синапсы накапливают metaplastic_state и становятся жёстче к перезаписи
+        # — защита редких ассоциаций от частотного фона (закон Ципфа).
+        self.register_buffer("metaplastic_state", torch.zeros(n_out, n_in))
+        self.metaplasticity_rate = 0.02
+        self.metaplasticity_decay = 0.9998
+
+        # STP Цодыкса-Маркрама (порт Spiker v6.0): пресинаптические ресурсы
+        # u/x размера O(N_pre). 'depressing' — рабочая память на рекуррентности.
+        self.stp_mode = "none"      # 'none' | 'facilitating' | 'depressing'
+        self.stp_strength = 1.0
+        self.tau_facil = 300.0
+        self.tau_rec = 200.0
+        self.stp_u0 = 0.25
+        self.stp_u: Optional[torch.Tensor] = None
+        self.stp_x: Optional[torch.Tensor] = None
+
         self.z_pre: Optional[torch.Tensor] = None
         self.z_post: Optional[torch.Tensor] = None
         self.e_pre: Optional[torch.Tensor] = None
@@ -99,8 +116,52 @@ class StatefulSynapse(nn.Module):
             return torch.clamp(w, min=0.0)
         return w
 
+    def enable_stp(
+        self,
+        mode: str = "depressing",
+        dt: float = 1.0,
+        stp_u0: Optional[float] = None,
+        tau_facil: float = 300.0,
+        tau_rec: float = 200.0,
+        strength: float = 1.0,
+    ) -> None:
+        """Включить Tsodyks-Markram STP на этом синапсе."""
+        assert mode in ("facilitating", "depressing")
+        self.stp_mode = mode
+        self.stp_strength = float(strength)
+        self.tau_facil, self.tau_rec = float(tau_facil), float(tau_rec)
+        self.stp_u0 = (0.15 if mode == "facilitating" else 0.55) \
+            if stp_u0 is None else float(stp_u0)
+        self.register_buffer(
+            "dec_stp_u", torch.exp(torch.tensor(-dt / self.tau_facil)))
+        self.register_buffer(
+            "dec_stp_x", torch.exp(torch.tensor(-dt / self.tau_rec)))
+
+    @torch.no_grad()
+    def _stp_gain(self, s_pre: torch.Tensor) -> torch.Tensor:
+        """Гейн STP: u обновляется по правилу TM, x — истощение ресурсов."""
+        if self.stp_u is None or self.stp_u.shape != s_pre.shape \
+                or self.stp_u.device != s_pre.device:
+            self.stp_u = torch.full(
+                s_pre.shape, self.stp_u0, device=s_pre.device, dtype=s_pre.dtype)
+            self.stp_x = torch.ones(
+                s_pre.shape, device=s_pre.device, dtype=s_pre.dtype)
+        act = (s_pre > 0).to(s_pre.dtype)
+        u_minus = self.stp_u0 + (self.stp_u - self.stp_u0) * self.dec_stp_u
+        x_minus = 1.0 - (1.0 - self.stp_x) * self.dec_stp_x
+        u_plus = torch.clamp(u_minus + self.stp_u0 * (1.0 - u_minus) * act,
+                             min=0.0, max=1.0)
+        x_plus = torch.clamp(x_minus - u_plus * x_minus * act
+                             + (1.0 - act) * 0.02 * (1.0 - x_minus),
+                             min=0.0, max=1.0)
+        self.stp_u, self.stp_x = u_plus, x_plus
+        norm = max(1e-6, self.stp_u0 * (2.0 - self.stp_u0))
+        return (1.0 - self.stp_strength) + self.stp_strength * (u_plus * x_plus) / norm
+
     def forward(self, s_pre: torch.Tensor) -> torch.Tensor:
         """Постсинаптический драйв проводимости: [B, n_in] -> [B, n_out]."""
+        if self.stp_mode != "none":
+            s_pre = s_pre * self._stp_gain(s_pre)
         return F.linear(s_pre, self.w_eff)
 
     def drive_sparse(self, s_pre: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
@@ -157,6 +218,15 @@ class StatefulSynapse(nn.Module):
         ltp = torch.einsum("bo,bi->oi", s_post * da_pos, self.e_pre)
         ltd = torch.einsum("bo,bi->oi", self.e_post * da_pos, s_pre)
         delta = lr * (a_plus * ltp - a_minus * ltd) / float(s_pre.shape[0])
+
+        # Каскад метапластичности Фузи: синапсы с богатой историей правок
+        # жёстче к перезаписи (metaplastic_gate in [0.25, 1]).
+        meta_gate = torch.clamp(1.0 - 0.70 * self.metaplastic_state,
+                                min=0.25, max=1.0)
+        delta = delta * meta_gate
+        self.metaplastic_state.mul_(self.metaplasticity_decay).add_(
+            self.metaplasticity_rate
+            * delta.abs() / max(1e-6, float(cfg.w_fast_max)))
 
         if learn:
             self.w_fast.mul_(cfg.w_fast_decay).add_(delta * self.mask)

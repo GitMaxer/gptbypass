@@ -129,6 +129,37 @@ def test_cortex_system_facade(tmp_path):
     assert q["compression"] > 2.0
 
 
+def test_orexin_no_field_stp_2ag_integrated():
+    """Аудит нейрохимии v9: орексин, NO-поле, STP, метапластичность Фузи, 2-AG."""
+    org = _org()
+    org.set_phase(2)
+    org.reset_state(3)
+    # STP включён на рекуррентности L2/3
+    for col in org.columns.values():
+        assert col.syn["rec"].stp_mode == "depressing"
+        assert col.syn["rec"].metaplastic_state.shape == col.syn["rec"].w_slow.shape
+    # 2-AG: буфер в каждом нейронном пуле
+    assert org.columns["A"].pools["l23"].ecb_2ag is not None
+
+    x = torch.zeros(3, 24)
+    x[:, 1] = 1.0
+    for _ in range(30):  # энергия тратится -> орексин растёт
+        out = org.step(x, learn=True)
+    assert "orexin" in out and "no_field" in out
+    assert out["no_field"]["field"].shape[0] == 3
+    om = org.orexin.state_summary()
+    assert 0.0 <= om["orexin"] <= 1.0 and 0.0 <= om["energy"] <= 1.0
+    # Голодная сеть спешит: порог БГ снижает орексин
+    bg = org.basal_ganglia
+    bg.reset_state(1)
+    logits = torch.zeros(1, 24); logits[0, 0] = 4.0
+    o_full = torch.full((1, 1), 0.9)
+    thr_hungry = float(bg(logits, orexin_level=o_full)["threshold"])
+    bg.reset_state(1)
+    thr_fed = float(bg(logits)["threshold"])
+    assert thr_hungry < thr_fed
+
+
 def test_phase1_column_loss_decreases():
     """Ключевой контракт «одной большой партии»: L_A должен падать."""
     org = _org()

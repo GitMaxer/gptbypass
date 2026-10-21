@@ -55,6 +55,8 @@ from neuroweave8.organism.active_inference import ActiveInference
 from ..memory.laplace import LaplaceTimingBank
 from ..action.basal_ganglia import BasalGangliaGate
 from ..modulation.pacemaker import ThetaGammaOscillator
+from ..modulation.orexin import OrexinInteroceptiveLoop
+from ..modulation.no_field import NitricOxideField
 from .sync import HemisphereSync
 
 
@@ -146,6 +148,13 @@ class CortexOrganism(nn.Module):
         self.laplace_memory = LaplaceTimingBank(
             feature_dim=self.input_dim, num_scales=num_laplace_scales, dt=dt)
         self.basal_ganglia = BasalGangliaGate(dt=dt)
+        # Порты Spiker v7.0: орексиновый интероцептивный контур и NO-поле
+        self.orexin = OrexinInteroceptiveLoop(dt=dt)
+        self.no_field = NitricOxideField(num_neurons=self.cfg.col("C").n_l23, dt=dt)
+        # STP Цодыкса-Маркрама на рекуррентности L2/3 — рабочая память
+        for col in self.columns.values():
+            if "rec" in col.syn:
+                col.syn["rec"].enable_stp("depressing", dt=dt)
 
         # Точка слияния: структурная θ-γ синхронизация полушарий
         n_l23 = self.cfg.col("A").n_l23
@@ -212,6 +221,9 @@ class CortexOrganism(nn.Module):
         self.sync.reset_state(batch_size, dev)
         self.laplace_memory.reset_state(batch_size, dev)
         self.basal_ganglia.reset_state(batch_size, dev)
+        self.orexin.reset_state(batch_size, dev)
+        self.no_field.reset_state(batch_size, dev)
+        self._last_activity = torch.zeros(batch_size, 1, device=dev)
         self.hippo.reset_state(dev)
         self.oscillator.reset_state(dev)
         self.credit.reset_episode()
@@ -336,11 +348,12 @@ class CortexOrganism(nn.Module):
         self._prev_c_in = F.pad(
             a_out.detach(), (0, max(0, n_in_c - a_out.shape[-1])))[:, :n_in_c]
 
-        # 8. Гиппокамп + Лапласова память + синхронизация полушарий
+        # 8. Гиппокамп + Лапласова память + синхронизация полушарий + NO-поле
         self.hippo.process(token_input.detach())
         laplace_out = self.laplace_memory.step(token_input)
         sync_out = self.sync.step(outs["A"].spikes["l23"].detach(),
                                   outs["C"].spikes["l23"].detach())
+        no_out = self.no_field.step(outs["C"].spikes["l23"].detach())
 
         # 9. Workspace: конкуренция зон -> fused логиты
         logits_a = self.columns["A"].logits()
@@ -351,29 +364,42 @@ class CortexOrganism(nn.Module):
         alpha, winner, eff = self.workspace.compete(bids)
         fused = self.workspace.fuse(alpha, logits_list, winner=winner)
 
-        # 10. Базальные ганглии: темп решения
-        z_a = self.neuro.index["A"]
-        bg_out = self.basal_ganglia(
-            fused,
-            serotonin_5ht=self.neuro.ht[z_a],
-            ach_level=self.neuro.ach[z_a])
-
-        # 11. Химия + медленный контур
-        info = self.neuro.step(spike_sums={
-            n: outs[n].spikes["l23"].detach().sum() for n in self.names})
-        self._ne_rise_prev = info["ne_rise"]
+        # 10. Интероцептивный контур (Spiker §7.0): активность такта =
+        #     метаболическая стоимость; энтропия выхода = давление цели.
         probs = F.softmax(fused, dim=-1)
         entropy_t = (-(probs * probs.clamp_min(1e-9).log()).sum(-1)).mean()
         firing_t = torch.cat([outs[n].spikes["l23"] for n in self.names],
                              dim=-1).mean()
+        self._last_activity = firing_t.detach().reshape(-1, 1).clone()
+        entropy_mean = float(entropy_t.detach())
+        if entropy_mean > 0.9:
+            self.orexin.register_goal("reduce_output_entropy")
+        elif "reduce_output_entropy" in self.orexin.unfinished_goals:
+            self.orexin.satisfy_goal("reduce_output_entropy")
+        orexin_out = self.orexin.step(activity=self._last_activity)
+
+        # 11. Базальные ганглии: темп решения (порог снижает орексин)
+        z_a = self.neuro.index["A"]
+        bg_out = self.basal_ganglia(
+            fused,
+            serotonin_5ht=self.neuro.ht[z_a],
+            ach_level=self.neuro.ach[z_a],
+            orexin_level=orexin_out["orexin"])
+
+        # 12. Химия + медленный контур
+        info = self.neuro.step(spike_sums={
+            n: outs[n].spikes["l23"].detach().sum() for n in self.names})
+        self._ne_rise_prev = info["ne_rise"]
         self.slow.poll(float(self.neuro.sleep_pressure))
         self._steps += 1
 
         metrics = {}
         if sync_metrics:
             metrics = {
-                "entropy": float(entropy_t.detach()),
-                "firing_rate": float(firing_t),
+                "entropy": entropy_mean,
+                "orexin": float(orexin_out["orexin"].mean()),
+                "energy": float(orexin_out["energy"].mean()),
+                "firing_rate": float(firing_t.detach()),
                 "sleep_pressure": float(self.neuro.sleep_pressure),
                 "winner_zone": float(winner.float().mean()),
                 "sync_coherence": float(sync_out["coherence"]),
@@ -405,6 +431,8 @@ class CortexOrganism(nn.Module):
             "basal_ganglia": bg_out,
             "laplace_memory": laplace_out,
             "sync": sync_out,
+            "orexin": orexin_out,
+            "no_field": no_out,
             "oscillator": osc,
             "metrics": metrics,
         }
@@ -454,7 +482,8 @@ class CortexOrganism(nn.Module):
                    sync_coherence=float(self.sync.coherence),
                    wm_occupancy=float(self.sync.binder.occupancy())
                    if self.sync.binder.buf is not None else 0.0,
-                   bg_emissions=float(self.basal_ganglia.total_emissions))
+                   bg_emissions=float(self.basal_ganglia.total_emissions),
+                   **{f"orexin_{k}": v for k, v in self.orexin.state_summary().items()})
         return tel
 
     def cortical_dim(self) -> int:

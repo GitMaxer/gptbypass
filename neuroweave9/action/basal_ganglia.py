@@ -51,6 +51,7 @@ class BasalGangliaGate(nn.Module):
         workspace_logits: torch.Tensor,
         serotonin_5ht: Optional[torch.Tensor] = None,
         ach_level: Optional[torch.Tensor] = None,
+        orexin_level: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         batch_size = workspace_logits.shape[0]
         device = workspace_logits.device
@@ -77,6 +78,10 @@ class BasalGangliaGate(nn.Module):
         evidence_before_reset = self.evidence_acc.clone()
 
         mod_factor = torch.ones((batch_size, 1), device=device, dtype=dtype)
+        if orexin_level is not None:
+            # Голодная сеть «спешит»: орексин снижает порог эмиссии.
+            orexin = orexin_level.detach().mean(dim=-1, keepdim=True).clamp(0.0, 1.0)
+            mod_factor = mod_factor - 0.30 * orexin
         if serotonin_5ht is not None:
             s5ht = serotonin_5ht.detach().mean(dim=-1, keepdim=True).clamp(0.0, 1.0)
             mod_factor = mod_factor + self.alpha_5ht * (s5ht - 0.5)

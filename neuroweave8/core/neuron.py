@@ -46,6 +46,7 @@ class LaminarALIF(nn.Module):
         self.register_buffer("dec_nmda", torch.exp(torch.tensor(-cfg.dt / cfg.tau_nmda)))
         self.register_buffer("dec_gaba", torch.exp(torch.tensor(-cfg.dt / cfg.tau_gaba)))
         self.register_buffer("alpha_a", torch.exp(torch.tensor(-cfg.dt / cfg.tau_a)))
+        self.register_buffer("alpha_2ag", torch.exp(torch.tensor(-cfg.dt / cfg.tau_2ag)))
 
         self.v: Optional[torch.Tensor] = None
         self.a: Optional[torch.Tensor] = None
@@ -53,6 +54,7 @@ class LaminarALIF(nn.Module):
         self.g_ampa: Optional[torch.Tensor] = None
         self.g_nmda: Optional[torch.Tensor] = None
         self.g_gaba: Optional[torch.Tensor] = None
+        self.ecb_2ag: Optional[torch.Tensor] = None
 
     # ------------------------------------------------------------------
     def reset_state(self, batch: int, device, dtype=torch.float32) -> None:
@@ -63,6 +65,7 @@ class LaminarALIF(nn.Module):
         self.g_ampa = torch.zeros(shp, device=device, dtype=dtype)
         self.g_nmda = torch.zeros(shp, device=device, dtype=dtype)
         self.g_gaba = torch.zeros(shp, device=device, dtype=dtype)
+        self.ecb_2ag = torch.zeros(shp, device=device, dtype=dtype)
         # Константы такта: e_cl (KCC2-хомеостат — константа cfg) и sigma
         # вычисляются один раз на состояние, а не на каждый шаг.
         self._e_cl = e_cl_effective(
@@ -78,7 +81,7 @@ class LaminarALIF(nn.Module):
 
     def detach_state(self) -> None:
         """O(1)-память по времени: история предыдущих тактов вне графа."""
-        for attr in ("v", "a", "g_ampa", "g_nmda", "g_gaba"):
+        for attr in ("v", "a", "g_ampa", "g_nmda", "g_gaba", "ecb_2ag"):
             t = getattr(self, attr)
             if t is not None:
                 setattr(self, attr, t.detach())
@@ -138,6 +141,15 @@ class LaminarALIF(nn.Module):
             self.g_nmda.clamp_(min=0.0)
             self.g_gaba.clamp_(min=0.0)
 
+        # --- 2-AG ретроградная депрессия (Chaotic Itinerancy, Spiker v6.0):
+        #     нейрон, залипший в аттракторе, ослабляет свой соматический драйв ---
+        if cfg.itinerancy_2ag_strength > 0.0:
+            over_lock = torch.relu(self.ecb_2ag - 0.35)
+            retro_gate = torch.clamp(
+                1.0 - cfg.itinerancy_2ag_strength * over_lock, min=0.5, max=1.0)
+            g_ampa = g_ampa * retro_gate
+            g_nmda = g_nmda * retro_gate
+
         # --- фронтальный сброс усталости норадреналином (событие, не уровень) ---
         if ne_rise is not None:
             keep = torch.clamp(1.0 - ne_rise, 0.0, 1.0)
@@ -187,13 +199,16 @@ class LaminarALIF(nn.Module):
 
         # --- адаптация порога ---
         a_new = self.alpha_a * a_pre + s.detach()
+        ecb_new = self.alpha_2ag * self.ecb_2ag + s.detach()
 
         if inplace:
             self.v.copy_(v_new)
             self.a.copy_(a_new)
             self.refr.copy_(refr)
+            self.ecb_2ag.copy_(ecb_new)
         else:
             self.v, self.a, self.refr = v_new, a_new, refr
+            self.ecb_2ag = ecb_new
             self.g_ampa, self.g_nmda, self.g_gaba = g_ampa, g_nmda, g_gaba
 
         return {"spikes": s, "v": self.v, "v_inf": v_inf,

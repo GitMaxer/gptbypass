@@ -56,6 +56,13 @@ class NeuronCfg:
     stochastic: bool = True
     sigma: float = 0.001
 
+    # Эндоканнабиноидная ретроградная депрессия 2-AG (порт Spiker v6.0,
+    # «Chaotic Itinerancy»): EMA собственных спайков нейрона; при залипании
+    # в аттракторе (2-AG > 0.35) временно ослабляет входящий соматический
+    # драйв — сеть выходит из аттрактора и переключается на новую ассоциацию.
+    tau_2ag: float = 250.0
+    itinerancy_2ag_strength: float = 0.08
+
 
 @dataclass
 class ColumnCfg:
