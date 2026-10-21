@@ -23,8 +23,20 @@ __version__ = "8.0.0"
 __all__ = [
     "OrganismCfg", "NeuronCfg", "ColumnCfg", "PhaseCfg", "HippoCfg", "ModCfg",
     "PlasticityCfg", "StructuralCfg", "WorkspaceCfg", "CallosumCfg", "SleepCfg",
-    "default_cfg", "build_organism",
+    "default_cfg", "build_organism", "NeuroSystem", "quantize_organism",
 ]
+
+
+def NeuroSystem(*args, **kwargs):  # noqa: N802 — фасад системы
+    """Системная обёртка организма (импорт отложен, как у build_organism)."""
+    from .organism.system import NeuroSystem as _NS
+    return _NS(*args, **kwargs)
+
+
+def quantize_organism(org, bits: int = 8):
+    """int8-развёртывание синапсов (импорт отложен)."""
+    from .core.quantize import quantize_organism as _q
+    return _q(org, bits=bits)
 
 
 def build_organism(cfg: OrganismCfg | None = None, preset: str | None = None,

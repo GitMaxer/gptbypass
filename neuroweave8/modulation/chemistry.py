@@ -143,7 +143,7 @@ class NeuroChemistry(nn.Module):
         # 6. Давление сна (ур. 20): интеграл нагрузки минус истощение 5-HT
         if spike_sums is not None and spike_sums:
             load = sum(float(v.sum()) for v in spike_sums.values())
-            self.sp_user.add_(load * 0.0 + 1.0).clamp_(max=1e9)
+            self.sp_user.add_(1.0).clamp_(max=1e9)
             self.sleep_pressure += (cfg.pressure_gain if hasattr(cfg, "pressure_gain")
                                     else 2e-4) * load
             self.sleep_pressure -= 0.00005 * float(self.ht.mean())

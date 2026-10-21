@@ -63,6 +63,13 @@ class LaminarALIF(nn.Module):
         self.g_ampa = torch.zeros(shp, device=device, dtype=dtype)
         self.g_nmda = torch.zeros(shp, device=device, dtype=dtype)
         self.g_gaba = torch.zeros(shp, device=device, dtype=dtype)
+        # Константы такта: e_cl (KCC2-хомеостат — константа cfg) и sigma
+        # вычисляются один раз на состояние, а не на каждый шаг.
+        self._e_cl = e_cl_effective(
+            torch.as_tensor(self.e_cl_base, dtype=dtype, device=device),
+            self.cfg).expand(shp)
+        self._sigma0 = torch.as_tensor(
+            self.cfg.sigma, dtype=dtype, device=device)
 
     def _ensure(self, ref: torch.Tensor) -> None:
         if (self.v is None or self.v.shape != ref.shape
@@ -103,7 +110,6 @@ class LaminarALIF(nn.Module):
             inplace = True
 
         cfg = self.cfg
-        zero = torch.zeros_like(self.g_ampa)
 
         if inplace:
             self.g_ampa.mul_(self.dec_ampa).add_(raw_basal)
@@ -115,6 +121,7 @@ class LaminarALIF(nn.Module):
                 self.g_gaba.add_(raw_gaba)
             g_ampa, g_nmda, g_gaba = self.g_ampa, self.g_nmda, self.g_gaba
         else:
+            zero = torch.zeros_like(self.g_ampa)
             g_ampa = self.g_ampa * self.dec_ampa + raw_basal
             g_nmda = self.g_nmda * self.dec_nmda + (raw_apical if raw_apical is not None else zero)
             g_gaba = self.g_gaba * self.dec_gaba + (raw_gaba if raw_gaba is not None else zero)
@@ -152,15 +159,13 @@ class LaminarALIF(nn.Module):
         # --- шум: свойство организма, не артефакт обучения ---
         sigma = None
         if cfg.stochastic and cfg.sigma > 0.0:
-            base = torch.as_tensor(cfg.sigma, dtype=g_ampa.dtype, device=g_ampa.device)
+            base = self._sigma0
             if ht is not None:
                 h = torch.clamp(ht, 0.0, 1.0)
                 base = base * (0.25 + 2.0 * (1.0 - h))
             sigma = base
 
-        e_cl = e_cl_effective(
-            torch.as_tensor(self.e_cl_base, dtype=g_ampa.dtype, device=g_ampa.device),
-            cfg).expand_as(self.v)
+        e_cl = self._e_cl
 
         v_new, v_inf = exact_step(self.v, g_ampa, g_nmda, g_gaba, e_cl, cfg,
                                   sigma=sigma, generator=generator)

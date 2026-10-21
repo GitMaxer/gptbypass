@@ -105,6 +105,15 @@ class Organism(nn.Module):
         self.credit.reset_episode()
         self._apical_in = {}
         self._pending_ff = {}
+        # Преаллоцированные нулевые буферы апикального/базального
+        # контекстов: горячий такт обнуляет их in-place, а не просит
+        # у аллокатора по dict'у тензоров на каждый вызов.
+        self._apical = {n: torch.zeros(b, self.cfg.col(n).n_l5,
+                                     device=self.device)
+                        for n in self.names}
+        self._ff = {n: torch.zeros(b, self.cfg.col(n).n_l4,
+                                 device=self.device)
+                    for n in self.names}
 
     def assemble(self) -> None:
         """Фаза 2: включить межобластные пути, заморозить базис."""
@@ -123,8 +132,14 @@ class Organism(nn.Module):
         dev = self.device
 
         # 1. Доставка контекстов шины (отложенный апикальный путь)
-        apical: Dict[str, torch.Tensor] = {n: torch.zeros(
-            B, self.cfg.col(n).n_l5, device=dev) for n in self.names}
+        if not hasattr(self, "_apical") or self._apical[self.names[0]].shape[0] != B:
+            self._apical = {n: torch.zeros(B, self.cfg.col(n).n_l5,
+                                         device=dev) for n in self.names}
+            self._ff = {n: torch.zeros(B, self.cfg.col(n).n_l4,
+                                     device=dev) for n in self.names}
+        apical = self._apical
+        for t in apical.values():
+            t.zero_()
         for dst, src, layer, kind in self.fb_routes:
             bus = self._callosum[f"{src}->{dst}"]
             fwd_msg = self.columns[src].prediction_spikes()
@@ -133,8 +148,9 @@ class Organism(nn.Module):
             apical[dst] = apical[dst] + to_dst
 
         # 2. Прямые маршруты ff -> базальный драйв L4 адресата
-        ff: Dict[str, torch.Tensor] = {n: torch.zeros(
-            B, self.cfg.col(n).n_l4, device=dev) for n in self.names}
+        ff = self._ff
+        for t in ff.values():
+            t.zero_()
         for dst, src, layer, kind in self.routes:
             if kind != "ff":
                 continue

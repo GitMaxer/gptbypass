@@ -14,7 +14,8 @@
 pip install torch pytest          # CPU-режим поддерживается из коробки
 python -m neuroweave8.main --preset poc --steps 200 --batch 4
 python -m neuroweave8.bench --preset poc --ticks 200 --batch 4
-pytest tests/                     # 23 теста: ядро + организм + пайплайн
+python -m neuroweave8.bench --sweep --ticks 40   # свип масштабирования
+pytest tests/                     # 28 тестов: ядро + организм + пайплайн + скейлинг
 ```
 
 ## Состав репозитория
@@ -47,3 +48,9 @@ pytest tests/                     # 23 теста: ядро + организм +
 - **Сон**: приоритизированный реплей гиппокампа, мягкая консолидация
   w_fast→w_slow, прунинг, EWC rebaseline; медленный контур с
   гистерезисом по sleep pressure.
+- **NeuroSystem** (`organism/system.py`): развёртываемая системная
+  граница — boot/эпизоды/авто-сон/телеметрия/save-load/quantize.
+- **int8-квантизация** синапсов: ~10x памяти, max|Δw|<0.01, инференс
+  на снимках.
+- **Масштабирование**: small→poc→wide (до ~144k синапсов), сублинейная
+  цена такта; `bench.py --sweep`.

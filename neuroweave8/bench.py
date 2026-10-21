@@ -49,10 +49,45 @@ def bench(preset: str = "poc", ticks: int = 200, batch: int = 4) -> Dict[str, fl
     return res
 
 
+def bench_scaling(presets=("small", "poc", "wide"),
+                  batches=(1, 4, 16), ticks: int = 60) -> list:
+    """Свип масштабирования: ticks/sec по размерам организма и батчу.
+
+    Линейность по нейронам и подлинейность по батчу — экономика
+    событийного контура: стоимость растёт по активным ребрам, а не по
+    плотности матриц.
+    """
+    rows = []
+    for p in presets:
+        for b in batches:
+            try:
+                r = bench(preset=p, ticks=ticks, batch=b)
+            except Exception as e:  # noqa: BLE001
+                r = {"preset": p, "neurons": float("nan"),
+                     "synapses": float("nan"), "ticks_per_sec": 0.0,
+                     "behave_per_sec": 0.0, "ms_per_tick": float("inf"),
+                     "error": str(e)}
+            r["batch"] = float(b)
+            rows.append(r)
+    print("\n=== scaling sweep ===")
+    print(f"  {'preset':>6} {'batch':>5} {'neurons':>8} {'synapses':>9} "
+          f"{'ticks/s':>9} {'ms/tick':>8}")
+    for r in rows:
+        print(f"  {r['preset']:>6} {int(r['batch']):>5} "
+              f"{r['neurons']:>8.0f} {r['synapses']:>9.0f} "
+              f"{r['ticks_per_sec']:>9.1f} {r['ms_per_tick']:>8.2f}")
+    return rows
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="poc", choices=["small", "poc", "wide"])
     ap.add_argument("--ticks", type=int, default=200)
     ap.add_argument("--batch", type=int, default=4)
+    ap.add_argument("--sweep", action="store_true",
+                    help="свип пресетов x батчей (масштабирование)")
     args = ap.parse_args()
-    bench(args.preset, args.ticks, args.batch)
+    if args.sweep:
+        bench_scaling(ticks=args.ticks)
+    else:
+        bench(args.preset, args.ticks, args.batch)

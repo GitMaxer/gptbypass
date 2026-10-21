@@ -66,8 +66,9 @@ class CreditPipeline:
     def step_column(self, col, s_in: torch.Tensor, s_exc_post: Dict[str, torch.Tensor],
                     lr_scale: float = 1.0) -> torch.Tensor:
         """Раздать импульс зоны пластичности её синапсов (тензорно)."""
-        imp = self.pending[self.index[col.name]].clone()
-        self.pending[self.index[col.name]] = 0.0
+        i = self.index[col.name]
+        imp = self.pending[i].detach()
+        self.pending[i] = 0.0
         lr = self.lr_fast * lr_scale
         pairs = [("in_4", s_in, s_exc_post["l4"]),
                  ("4_23", col.prev["l4"], s_exc_post["l23"]),

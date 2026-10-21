@@ -69,8 +69,27 @@ memory/      hippocampus — DG/CA3/CA1 + хранилище эпизодов
 modulation/  chemistry (тензорная химия+диффузия), controller (мета-политика)
 topology/    callosum (шина с задержкой), workspace (Soft-WTA + компетентность)
 learning/    credit (критик+событийный DA), ewc, sleep, structural
-organism/    organism (единый такт), slow_loop (CPU-метаконтур)
+organism/    organism (единый такт), slow_loop (CPU-метаконтур),
+             system (NeuroSystem — фасад развёртывания)
 tasks/       environments (MarkovStream, RuleShiftTask, BindingTask)
 main.py      демо жизненного цикла
-tests/       17 тестов инвариантов + интеграция
+bench.py     бенчмарк + свип масштабирования (--sweep)
+tests/       28 тестов инвариантов + интеграция + пайплайн + скейлинг
 ```
+
+## Этап «оптимизация / масштабирование / квантизация / система»
+
+- **NeuroSystem** (`organism/system.py`) — системная граница канона:
+  `boot()` (изоляция→сборка), `step`/`act`, `run_episode` с авто-сном
+  по гистерезису, `report()` (нейроны/синапсы/байты/давление сна),
+  `save`/`load`, `quantize()`.
+- **int8-квантизация** (`core/quantize.py`): построчный симметричный
+  снимок весов → ~10x памяти синапсов (24B/ребро → 2B), max|Δw| < 0.01;
+  горячий контур и drive_sparse работают на снимке (инференс-режим).
+- **Масштабирование**: пресеты small(76 нейронов)→poc(456)→wide(1824,
+  ~144k синапсов); `bench --sweep` показывает сублинейную цену роста
+  (~90 тактов/с на wide, CPU).
+- **Оптимизации горячего контура**: преаллоцированные апикальные/ff
+  буферы (ноль аллокаций на такт в organism.tick), кэшированные e_cl
+  (KCC2-константа) и sigma в нейроне, ленивый zero-тензор только в
+  не-inplace ветке, событийный sparse-путь L4 при плотности <40%.
