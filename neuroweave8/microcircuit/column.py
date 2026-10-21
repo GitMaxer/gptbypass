@@ -40,9 +40,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import ColumnCfg, NeuronCfg, PlasticityCfg
+from ..config import ColumnCfg, NeuronCfg, PlasticityCfg, PhaseCfg
 from ..core.neuron import LaminarALIF
 from ..core.synapse import StatefulSynapse
+from ..core.phase import ThetaGammaBinder
+from ..core.sparse import sparse_drive, active_indices
 
 # Дивергенция полушарий (табл. 2 канона): одни размеры — разная физика.
 HEMISPHERE_PRESETS = {
@@ -68,6 +70,12 @@ class PredictiveHead(nn.Module):
         self.b = nn.Parameter(torch.zeros(n_to))
         self.lr = lr
         self.register_buffer("err_ema", torch.zeros(()))
+        self.register_buffer("prec_ema", torch.ones(()))
+
+    @property
+    def precision(self) -> torch.Tensor:
+        """Π = 1/σ² ошибки — вес предиктивного кодинга (Feldman&Friston)."""
+        return 1.0 / (self.err_ema + 1e-3)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         return F.linear(h, self.w, self.b)
@@ -78,15 +86,19 @@ class PredictiveHead(nn.Module):
         pred = self.forward(h)
         err = target - pred
         if learn:
+            # Точность-взвешенное дельта-правило: надёжные области учатся
+            # быстрее, шумные — медленнее (precision-weighted prediction error)
+            pi = self.precision.clamp(max=10.0)
             b = float(h.shape[0])
-            self.w.add_(self.lr * (err.t() @ h) / b)
-            self.b.add_(self.lr * err.mean(0))
+            self.w.add_(self.lr * pi * (err.t() @ h) / b)
+            self.b.add_(self.lr * pi * err.mean(0))
         self.err_ema.mul_(0.98).add_(0.02 * err.pow(2).mean())
         return err
 
     @property
     def surprise(self) -> torch.Tensor:
-        return self.err_ema
+        """Точность-взвешенная ошибка — сигнал новизны для NE-аларма."""
+        return self.err_ema * self.precision.clamp(max=10.0)
 
 
 @dataclass
@@ -183,8 +195,15 @@ class LaminarColumn(nn.Module):
         self.readout: Optional[nn.Linear] = None
 
         # Голова чтения локальной задачи: L2/3 (репрезентация) + L5 (выход)
+        # θ-γ рабочая память области (7±2 слота поверх L2/3)
+        self.binder: Optional[ThetaGammaBinder] = (
+            ThetaGammaBinder(n["l23"], PhaseCfg(n_slots=cfg.wm_slots))
+            if cfg.wm_slots > 0 else None)
+        in_read = (n["l23"] + n["l5"]
+                   + (n["l23"] if self.binder is not None else 0)
+                   + cfg.n_in)  # + прямой таламо-кортикальный shortcut входа
         if cfg.n_out is not None:
-            self.readout = nn.Linear(n["l23"] + n["l5"], cfg.n_out)
+            self.readout = nn.Linear(in_read, cfg.n_out)
 
         # Локальное предсказание входа
         self.head = PredictiveHead(n["l23"], cfg.n_in, lr=pc.pred_lr)
@@ -206,6 +225,8 @@ class LaminarColumn(nn.Module):
         return m * (strength / max(density * cols, 1e-6))
 
     def reset_state(self, batch: int, device, dtype=torch.float32) -> None:
+        if self.binder is not None:
+            self.binder.reset_state(batch, device, dtype)
         n = self.cfg.pools()
         for p in self.pools.values():
             p.reset_state(batch, device, dtype)
@@ -260,7 +281,12 @@ class LaminarColumn(nn.Module):
         sst_prev = self.prev["sst"]
 
         # ---- L4: вход + перисоматический шунт PV -----------------------
-        drive4 = self.cfg.input_gain * self.syn["in_4"](s_in)
+        # Событийный путь: при разреженном входе платим за |active|, не за n_in
+        if float((s_in.abs() > 0).float().mean()) < 0.4:
+            drive4 = self.cfg.input_gain * sparse_drive(
+                s_in, self.syn["in_4"].w_eff)
+        else:
+            drive4 = self.cfg.input_gain * self.syn["in_4"](s_in)
         if extra_basal is not None:
             drive4 = drive4 + extra_basal
         gaba4 = F.linear(pv_prev, self.w_pv_4) if pv_prev is not None else None
@@ -339,6 +365,8 @@ class LaminarColumn(nn.Module):
         for k, sp in spikes.items():
             self.prev[k] = sp.detach()
         self.prev_in = s_in.detach()
+        if self.binder is not None:
+            self.binder.write(s23.detach())
 
         rates = {k: spikes[k].mean() for k in spikes}
         return ColumnOut(
@@ -354,8 +382,16 @@ class LaminarColumn(nn.Module):
 
     # ------------------------------------------------------------------
     def features(self) -> torch.Tensor:
-        """Репрезентация области для чтения задачи: [B, n_l23 + n_l5]."""
-        return torch.cat([self.trace["l23"], self.trace["l5"]], dim=-1)
+        """Репрезентация области для чтения задачи: [B, n_l23+n_l5(+n_l23 WM)]."""
+        f = torch.cat([self.trace["l23"], self.trace["l5"]], dim=-1)
+        if self.binder is not None and self.binder.buf is not None:
+            # свёртка рабочей памяти: среднее содержимое слотов
+            f = torch.cat([f, self.binder.buf.mean(dim=1)], dim=-1)
+        if self.prev_in is not None:
+            # прямой доступ к сенсорному паттерну (таламо-кортикальный
+            # shortcut) — развязывает идентичность входа и внутреннее состояние
+            f = torch.cat([f, self.prev_in], dim=-1)
+        return f
 
     def logits(self) -> torch.Tensor:
         if self.readout is None:

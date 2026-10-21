@@ -31,6 +31,7 @@ from ..learning.ewc import EWCRegularizer
 from ..learning.structural import StructuralPlasticity
 from ..memory.hippocampus import Hippocampus
 from .slow_loop import SlowLoopController
+from .active_inference import ActiveInference
 
 
 class Organism(nn.Module):
@@ -86,6 +87,7 @@ class Organism(nn.Module):
         self.structural = StructuralPlasticity(cfg.structural)
         self.slow = SlowLoopController(theta_sleep=cfg.sleep.threshold,
                                        poll_interval=200)
+        self.infer = ActiveInference(len(self.names), gamma=4.0, gain=0.6)
         self._ewc: Optional[EWCRegularizer] = None
         self._steps = 0
         self._apical_in: Dict[str, torch.Tensor] = {}
@@ -141,12 +143,19 @@ class Organism(nn.Module):
                 ff[dst] = ff[dst] + F.pad(
                     s, (0, max(0, ff[dst].shape[-1] - s.shape[-1])))[:, : ff[dst].shape[-1]]
 
-        # 3. Такт колонок с родной нейрохимией
+        # 3. Такт колонок с родной нейрохимией + EFE-внимание
+        comp = torch.zeros(len(self.names), device=dev)
+        k = min(len(self.names), self.workspace.track.numel())
+        comp[:k] = self.workspace.track[:k].to(dev)
+        nov = torch.tensor([float(c.head.surprise)
+                            for c in self.columns.values()], device=dev)
+        att = self.infer.gains(comp, nov)
         outs: Dict[str, object] = {}
-        for n, col in self.columns.items():
+        for i, (n, col) in enumerate(self.columns.items()):
             z = self.neuro.index[n]
             outs[n] = col.step(
                 inputs[n], extra_basal=ff[n], extra_apical=apical[n],
+                arousal=att[i].view(1, 1).expand(B, self.cfg.col(n).n_l5),
                 ach=self.neuro.ach[z],
                 ht=self.neuro.ht[z],
                 ne_rise=self._ne_rise_prev[z],
@@ -189,12 +198,14 @@ class Organism(nn.Module):
         logits = [self.columns[n].logits() for n in self.readout_names]
         bids = self.workspace.calibrated_bids(logits)
         alpha, winner, eff = self.workspace.compete(bids)
-        fused = self.workspace.fuse(alpha, logits)
+        fused = self.workspace.fuse(alpha, logits, winner=winner)
         self.workspace.update_track(logits, target)
         correct = fused.argmax(-1) == target
         reward = float(correct.float().mean())
         da = self.credit.observe_reward(reward)
-        ce = float(F.cross_entropy(fused, target))
+        ce = float(F.nll_loss(torch.log(fused.clamp(min=1e-9)), target))
+        col_acc = [float((l.argmax(-1) == target).float().mean())
+                   for l in logits]
         # Локальный обучаемый выход: дельта-правило softmax на признаках
         # области (L2/3+L5). Не autograd: спайковый тракт вне графа, голова
         # чтения — единственный надзорный сигнал задачи.
@@ -221,7 +232,7 @@ class Organism(nn.Module):
         self.controller.learn(self.critic_rpe())
         return {"fused": fused, "alpha": alpha, "winner": winner,
                 "correct": correct, "reward": reward, "da": da, "ce": ce,
-                "outs": outs}
+                "col_acc": col_acc, "outs": outs}
 
     def critic_rpe(self) -> float:
         return float(self.credit.stats["rpe_last"])

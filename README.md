@@ -1,18 +1,49 @@
-# relay-project
+# NEUROWEAVE 8
 
-Minimal reverse HTTP relay for restricted sandbox environments.
+Цифровой спайковый организм: **вычисление = память = обучение** в одном
+контуре. Этот репозиторий целиком посвящён проекту NEUROWEAVE.
 
-## Features
+Синтез канона `NEUROWEAVE_SPIKER_единый_концепт_v4.0.pdf` (включая все
+патчи CHANGELOG v4.0.1), инженерной базы `neuroweave_v6` и
+восстановленной `neuroweave_v7restored` — собран заново как ламинарный
+организм v8.
 
-- No ngrok / cloudflared / ssh required
-- Works over plain outbound HTTP from sandbox to VPS
-- Supports GET and POST
-- Handles headers, query string, request body
-- Secret-based agent auth
-- Graceful shutdown
-- Session cleanup
-
-## Install
+## Быстрый старт
 
 ```bash
-pip install -r requirements.txt
+pip install torch pytest          # CPU-режим поддерживается из коробки
+python -m neuroweave8.main --preset poc --steps 200 --batch 4
+python -m neuroweave8.bench --preset poc --ticks 200 --batch 4
+pytest tests/                     # 23 теста: ядро + организм + пайплайн
+```
+
+## Состав репозитория
+
+| Путь | Содержимое |
+|---|---|
+| `neuroweave8/` | **Рабочая версия v8** — ламинарные колонки, гиппокамп, мета-контроллер нейромодуляции, Global Workspace, θ-γ рабочая память + фазовый VSA, Corpus Callosum, цикл сон/бодрствование, EWC, структурная пластичность. Полная документация — `neuroweave8/README.md` |
+| `tests/` | Тест-пайплайн: ядро (нейрон/синапс/колонка/шина/WS/VSA), организм (behave/sleep/telemetry), пайплайн (адаптация к инверсии, консолидация, EWC, EFE-внимание, WM-биндер, разреженный путь) |
+| `neuroweave_v6/` | Эталон v6: точный экспоненциальный интегратор, проводимостная GABA, KCC2 |
+| `neuroweave_v7restored/` | Восстановленная v7 после потери — база архитектуры |
+| `docs/` | Аудит v6 и science-grounding заметки |
+| `concept_v4.txt`, `NEUROWEAVE_SPIKER_единый_концепт_v4.0.pdf` | Каноническая спецификация |
+
+## Ключевые уровни v8
+
+- **Ламинарная колонна** L4→L2/3→L5→L6 + PV/SST: базальный/апикальный
+  тракты разведены физически; дендритное плато L5 = AND-гейт
+  «вход И контекст».
+- **Гиппокамп** DG→CA3→CA1: паттерн-сепарация, аттракторное
+  восстановление, приоритизированный реплей во сне.
+- **Обучаемый мета-контроллер**: сетпоинты ACh/5-HT от телеметрии;
+  NE = фазический аларм неожиданной неопределённости (Yu & Dayan).
+- **Global Workspace** с заявками компетентности и winner-broadcast
+  fusion (WTA, ур. 9).
+- **Активный вывод**: EFE-внимание (компетентность × новизна → arousal-
+  гейн L1), precision-взвешенный PredictiveHead.
+- **θ-γ рабочая память** (7±2 слота) внутри каждой области + фазовый VSA.
+- **Событийный разреженный путь**: при плотности входа <40% драйв L4
+  идёт через sparse gather.
+- **Сон**: приоритизированный реплей гиппокампа, мягкая консолидация
+  w_fast→w_slow, прунинг, EWC rebaseline; медленный контур с
+  гистерезисом по sleep pressure.

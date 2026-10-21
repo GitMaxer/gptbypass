@@ -73,6 +73,7 @@ class ColumnCfg:
     n_out: Optional[int] = 16    # голова чтения (None — без головы)
 
     input_gain: float = 1.0
+    wm_slots: int = 7            # слотов θ-γ рабочей памяти (0 = выкл)
     density: float = 0.35        # плотность разреженных масок
     inh_strength: float = 0.45
     readout_decay: float = 0.8

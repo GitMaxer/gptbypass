@@ -51,6 +51,7 @@ class GlobalWorkspace(nn.Module):
     def calibrated_bids(self, logits: List[torch.Tensor]) -> torch.Tensor:
         """Заявки = уверенность чтения x (floor + track-протокол)."""
         conf = torch.stack([torch.softmax(l, -1).max(-1).values for l in logits], -1)
+        conf = torch.sqrt(conf.clamp(min=0.0))
         return conf * (self.floor + self.track.unsqueeze(0))
 
     @torch.no_grad()
@@ -59,8 +60,15 @@ class GlobalWorkspace(nn.Module):
             corr = float((l.argmax(-1) == target).float().mean())
             self.track[i].mul_(1.0 - self.rho).add_(self.rho * corr)
 
-    def fuse(self, alpha: torch.Tensor, logits: List[torch.Tensor]) -> torch.Tensor:
-        return torch.einsum("bz,bzv->bv", alpha, torch.stack(logits, 1))
+    def fuse(self, alpha: torch.Tensor, logits: List[torch.Tensor],
+             winner: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Трансляция победителя: Global Workspace — WTA-механизм, содержимое
+        победившей области транслируется глобально (ур. 9 канона: WTA +
+        латеральное торможение), а не усреднение экспертов."""
+        probs = torch.stack([F.softmax(l, -1) for l in logits], 1)
+        if winner is None:
+            winner = alpha.argmax(-1)
+        return probs[torch.arange(probs.shape[0], device=probs.device), winner]
 
     def storm_brake(self, activity: torch.Tensor) -> torch.Tensor:
         cap = self.storm_rate
