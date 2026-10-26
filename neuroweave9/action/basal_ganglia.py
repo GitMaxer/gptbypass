@@ -24,11 +24,12 @@ class BasalGangliaGate(nn.Module):
     def __init__(
         self,
         dt: float = 1.0,
-        base_threshold: float = 1.20,
+        base_threshold: float = 0.55,
         leak_rate: float = 0.05,
         alpha_5ht: float = 0.60,
         alpha_ach: float = 0.40,
         stn_conflict_gain: float = 0.35,
+        evidence_gain: float = 8.0,
     ):
         super().__init__()
         self.dt = float(dt)
@@ -37,6 +38,7 @@ class BasalGangliaGate(nn.Module):
         self.alpha_5ht = float(alpha_5ht)
         self.alpha_ach = float(alpha_ach)
         self.stn_conflict_gain = float(stn_conflict_gain)
+        self.evidence_gain = float(evidence_gain)
         self.evidence_acc: Optional[torch.Tensor] = None
         self.total_emissions: int = 0
 
@@ -66,15 +68,20 @@ class BasalGangliaGate(nn.Module):
         probs = F.softmax(workspace_logits.detach(), dim=-1)
         if probs.shape[-1] >= 2:
             top2_vals, top2_idx = torch.topk(probs, k=2, dim=-1)
-            margin = (top2_vals[:, 0:1] - top2_vals[:, 1:2]).clamp(min=0.0)
+            top2_logits = torch.topk(workspace_logits.detach(), k=2, dim=-1).values
+            # Дрифт из разности ЛОГИТОВ top-2 (margin в softmax ~1e-4 на
+            # почти плоском распределении — слишком слаб для DDM).
+            margin = (top2_logits[:, 0:1] - top2_logits[:, 1:2]).clamp(min=0.0)
             selected_token = top2_idx[:, 0]
-            stn_conflict = (1.0 - margin) * top2_vals[:, 1:2]
+            stn_conflict = (1.0 - (top2_vals[:, 0:1] - top2_vals[:, 1:2])) * top2_vals[:, 1:2]
         else:
             margin = probs[:, 0:1]
             selected_token = torch.zeros(batch_size, dtype=torch.long, device=device)
             stn_conflict = torch.zeros((batch_size, 1), device=device, dtype=dtype)
 
-        drift = margin - self.stn_conflict_gain * stn_conflict - self.leak_rate * self.evidence_acc
+        drift = (self.evidence_gain * (margin
+                 - self.stn_conflict_gain * stn_conflict)
+                 - self.leak_rate * self.evidence_acc)
         self.evidence_acc = torch.clamp(self.evidence_acc + self.dt * drift, min=0.0, max=10.0)
         evidence_before_reset = self.evidence_acc.clone()
 

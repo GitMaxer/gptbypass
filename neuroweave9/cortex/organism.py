@@ -59,6 +59,7 @@ from ..modulation.orexin import OrexinInteroceptiveLoop
 from ..modulation.no_field import NitricOxideField
 from ..modulation.son import SonBus
 from ..topology.thalamus import Thalamus
+from ..encoding import TemporalPhaseEncoder
 from .astrocyte import TripartiteAstrocyte
 from .sync import HemisphereSync
 
@@ -161,6 +162,7 @@ class CortexOrganism(nn.Module):
             n: TripartiteAstrocyte(self.cfg.col(n).n_l23, dt=dt)
             for n in self.names})
         self.son = SonBus(zone_size=self.cortical_dim(), dt=dt)
+        self.encoder = TemporalPhaseEncoder(self.input_dim, mode="latency")
         self.callosum.enable_adaptive_myelination(True)
         self._son_surprise: Optional[torch.Tensor] = None
         self._astro_gains: Optional[Dict[str, torch.Tensor]] = None
@@ -333,8 +335,14 @@ class CortexOrganism(nn.Module):
         # 3b. Таламус-TRN: сенсорный гейт. Surprise предыдущего такта и
         #     осциллятор модулируют пропускание входа в кору.
         z_a0 = self.neuro.index["A"]
+        # Latency-салиентность (TemporalPhaseEncoder): редкий токен =
+        # раньше = громче — механизм внимания на входе без обучения весов.
+        ids = token_input.argmax(dim=-1)
+        self.encoder.observe_tokens(ids)
+        sal = self.encoder.latency_salience(ids).unsqueeze(-1)
+        token_in = token_input * sal
         thal = self.thalamus(
-            token_input,
+            token_in,
             surprise=self._son_surprise,
             ach_level=self.neuro.ach[z_a0],
             ne_level=self.neuro.ne[z_a0],
@@ -343,7 +351,7 @@ class CortexOrganism(nn.Module):
 
         # 4. Такт колонок (в Фазе 1 — sltt для суррогатного градиента);
         #    астроцитарный stp_gain — медленная фасилитация L2/3.
-        inputs = self._column_inputs(relayed_input)
+        inputs = self._column_inputs(relayed_input.to(token_input.dtype))
         outs: Dict[str, object] = {}
         sltt = (self.phase == 1)
         for i, n in enumerate(self.names):
@@ -375,6 +383,7 @@ class CortexOrganism(nn.Module):
             self.credit.observe_reward(float(
                 reward.mean().item() if torch.is_tensor(reward) else reward))
 
+
         # 7. Вход C на следующий такт — выход L5 зоны A (ур. 1)
         a_out = self.columns["A"].output_spikes()
         n_in_c = self.cfg.col("C").n_in
@@ -395,6 +404,18 @@ class CortexOrganism(nn.Module):
         z_export, _apictx, son_surprise, _mloss, bus_mask = self.son(
             cortical, sltt_mode=sltt)
         self._son_surprise = son_surprise
+        # DA-импульс за пределы колоночных синапсов: пластичность шины SON
+        # и проекций Callosum (раздача CreditPipeline → SON/шина).
+        if learn and self.phase >= 2:
+            da_cortex = self.neuro.da.mean().detach().view(1, -1)
+            self.son.update_phase2_plasticity(
+                cortical.detach(), da_cortex,
+                lr_fast=self.cfg.plasticity.lr_fast)
+            if self.callosum._filtered is not None:
+                self.callosum.credit(
+                    outs["A"].spikes["l5"].detach(),
+                    self.callosum._filtered,
+                    da=da_cortex, direction="fwd")
         self._astro_gains = {}
         for n in self.names:
             z = self.neuro.index[n]
