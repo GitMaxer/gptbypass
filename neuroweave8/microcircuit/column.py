@@ -204,6 +204,14 @@ class LaminarColumn(nn.Module):
                    + cfg.n_in)  # + прямой таламо-кортикальный shortcut входа
         if cfg.n_out is not None:
             self.readout = nn.Linear(in_read, cfg.n_out)
+            # w_fast_readout: быстрый буфер выходной проекции (канон).
+            # При инверсии правила переобучается features->tokens без
+            # трогания замороженного readout.weight (rule inversion).
+            self.register_buffer(
+                "w_fast_readout", torch.zeros(cfg.n_out, in_read))
+        self._wfr_lr = pc.lr_fast
+        self._wfr_max = pc.w_fast_max
+        self._wfr_decay = pc.w_fast_decay
 
         # Локальное предсказание входа
         self.head = PredictiveHead(n["l23"], cfg.n_in, lr=pc.pred_lr)
@@ -355,6 +363,15 @@ class LaminarColumn(nn.Module):
             h = s23.detach()
             self.trace["l23"] = self.trace["l23"] * self.decay + h
         err = self.head.local_update(h, s_in, learn=learn)
+        if (learn and self.readout is not None and err is not None
+                and err.shape[-1] == self.w_fast_readout.shape[0]):
+            with torch.no_grad():
+                feat = self.features().detach()
+                self.w_fast_readout.mul_(self._wfr_decay).add_(
+                    self._wfr_lr * torch.einsum(
+                        "bo,bi->oi", err.detach(), feat)
+                    / max(1, feat.shape[0])).clamp_(
+                        -self._wfr_max, self._wfr_max)
         # head учится всегда, когда разрешено (это не autograd-параметр)
 
         spikes = {"l4": o4["spikes"], "l23": s23, "l5": o5["spikes"],
@@ -401,7 +418,8 @@ class LaminarColumn(nn.Module):
     def logits(self) -> torch.Tensor:
         if self.readout is None:
             raise RuntimeError(f"{self.name}: голова чтения не сконфигурирована")
-        return self.readout(self.features())
+        return self.readout(self.features()) + F.linear(
+            self.features(), self.w_fast_readout)
 
     def output_spikes(self) -> torch.Tensor:
         """Выход области = спайки L5 (а не L2/3: выход контекстно-гейтирован)."""
