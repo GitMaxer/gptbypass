@@ -5,8 +5,8 @@
 
 `neuroweave9` — **v9.0 «Cortex» (The Great Merge)**: гибрид измеренного
 пайплайна обучения Spiker v6.0 и инноваций NEUROWEAVE 8.
-`neuroweave8` — ламинарный организм v8 (синтез канона v4.0/v4.0.1,
-инженерной базы `neuroweave_v6` и восстановленной `neuroweave_v7restored`).
+`neuroweave8` — ламинарный организм v8, используемый v9 как библиотека
+ядра (нейрон/синапс/сон/callosum/credit); зафиксирован в `V8_V9_LOCK`.
 
 ## Быстрый старт
 
@@ -21,7 +21,7 @@ python -m neuroweave9.train_cortex --max-stories 200 --holdout 40 \
 python -m neuroweave8.main --preset poc --steps 200 --batch 4
 python -m neuroweave8.bench --sweep --ticks 40   # свип масштабирования
 
-pytest tests/                     # 36 тестов: v8 ядро/организм/скейлинг + v9 cortex
+pytest tests/                     # 48 тестов: v8 ядро/организм/скейлинг + v9 cortex
 ```
 
 ## Состав репозитория
@@ -32,10 +32,7 @@ pytest tests/                     # 36 тестов: v8 ядро/организ�
 | `neuroweave8/` | **v8** — ламинарные колонки, гиппокамп, мета-контроллер нейромодуляции, Global Workspace, θ-γ рабочая память + фазовый VSA, Corpus Callosum, цикл сон/бодрствование, EWC, структурная пластичность, int8, NeuroSystem. Документация — `neuroweave8/README.md` |
 | `tests/` | Тест-пайплайн: v8 ядро (нейрон/синапс/колонка/шина/WS/VSA), организм, пайплайн, скейлинг + **v9 cortex** (контракт Spiker, Фаза 1, EWC, синк, сон, фасад) |
 | `data/` | TinyStories corpus (4000 историй) для пайплайна v9 |
-| `neuroweave_v6/` | Эталон v6: точный экспоненциальный интегратор, проводимостная GABA, KCC2 |
-| `neuroweave_v7restored/` | Восстановленная v7 после потери — база архитектуры |
-| `docs/` | Аудит v6 и science-grounding заметки |
-| `concept_v4.txt`, `NEUROWEAVE_SPIKER_единый_концепт_v4.0.pdf` | Каноническая спецификация |
+| `V8_V9_LOCK` | Коммит-хэш ядра v8, на которое рассчитан v9 |
 
 ## v9.0 «Cortex» — The Great Merge
 
