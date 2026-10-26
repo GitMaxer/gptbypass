@@ -59,8 +59,11 @@ def evaluate_split(org: CortexOrganism, readout: LaplaceContextReadout,
         cortical = torch.cat([out["left"]["zone_a"]["spikes"],
                               out["left"]["zone_b"]["spikes"],
                               out["right"]["zone_c"]["spikes"]], dim=-1)
-        lap = org.laplace_memory.laplace_state.permute(1, 0, 2).reshape(
-            x_seq.shape[1], -1)
+        lap_state = org.laplace_memory.laplace_state
+        if x_seq.shape[1] == 0 or lap_state.numel() == 0:
+            continue
+        lap = lap_state.permute(1, 0, 2).reshape(
+            lap_state.shape[1], lap_state.shape[0] * lap_state.shape[2])
         logits = readout(cortical, lap, out["left"]["zone_a"]["logits"],
                          out["sync"]["frame_real"])
         total += float(F.cross_entropy(logits, y_seq[t], reduction="sum").item())
@@ -170,6 +173,11 @@ def main() -> int:
     stories = load_stories(args.data, args.max_stories + args.holdout)
     train_stories = stories[: args.max_stories]
     holdout_stories = stories[args.max_stories: args.max_stories + args.holdout]
+    # Если файл содержит ровно max_stories историй (4k-файл), срез пуст —
+    # берём хвост обучающего набора как holdout (иначе batch=0 в eval).
+    if not holdout_stories:
+        holdout_stories = train_stories[-args.holdout:]
+        train_stories = train_stories[: -args.holdout]
     itos, stoi, x_seq, y_seq, chosen = build_vocab_and_sequences(
         train_stories, args.max_vocab_size, args.seq_len,
         batch_size=args.max_stories, device=device)
