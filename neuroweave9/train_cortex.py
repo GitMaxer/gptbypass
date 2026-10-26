@@ -16,6 +16,7 @@ O(1)); сон с реплеем гиппокампа; генерация чер�
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Dict, List, Tuple
@@ -147,6 +148,10 @@ def main() -> int:
     ap.add_argument("--readout-chunks", type=int, default=1,
                     help="шагов оптимизатора декодера за эпоху (1 = оригинал)")
     ap.add_argument("--prior-weight", type=float, default=0.0)
+    ap.add_argument("--save", default=None,
+                    help="сохранить чекпоинт (организм+декодер+словарь) в .pt")
+    ap.add_argument("--curriculum", action="store_true",
+                    help="онтогенез: стадии словаря/seq_len по EMA-точности")
     args = ap.parse_args()
 
     device = torch.device(args.device if args.device != "auto"
@@ -219,6 +224,14 @@ def main() -> int:
     batch_size = x_seq.shape[1]
     t0 = time.perf_counter()
     gen = torch.Generator().manual_seed(args.seed)
+    dev_ctrl = None
+    if args.curriculum:
+        from .organism.development import DevelopmentalController
+        dev_ctrl = DevelopmentalController(
+            vocab_stages=[min(vocab_size, v) for v in
+                          (16, 48, vocab_size)],
+            seq_len_stages=[args.seq_len] * 3,
+            mastery_accuracy_threshold=0.55)
     for ep in range(1, args.phase2_epochs + 1):
         org.reset_state(batch_size=batch_size, device=device)
         opt = readout.optimizer
@@ -227,13 +240,18 @@ def main() -> int:
             perm = torch.randperm(batch_size, generator=gen).to(device)
             x_seq = x_seq[:, perm]
             y_seq = y_seq[:, perm]
+        if dev_ctrl is not None:
+            # Стадия развития ограничивает активный словарь потока
+            x_cur = dev_ctrl.clamp_tokens(x_seq)
+        else:
+            x_cur = x_seq
         step_losses = []
         ep_acc = 0.0
         chunk = max(1, args.seq_len // max(1, args.readout_chunks))
         for t in range(args.seq_len):
             org.oscillator.phase_reset(0.0)
             reward_t = torch.full((batch_size, 1), 1.0, device=device)
-            out = org.step(x_seq[t], reward=reward_t,
+            out = org.step(x_cur[t], reward=reward_t,
                            sync_metrics=(t == args.seq_len - 1))
             cortical = torch.cat([out["left"]["zone_a"]["spikes"],
                                   out["left"]["zone_b"]["spikes"],
@@ -258,6 +276,11 @@ def main() -> int:
         if args.readout_chunks <= 1:
             opt.step()
         ep_acc /= float(args.seq_len)
+        if dev_ctrl is not None:
+            st = dev_ctrl.observe_performance(ep_acc, total_ep_loss)
+            if st["promoted"]:
+                print(f"    [онтогенез] стадия {int(st['stage'])}: "
+                      f"vocab<={int(st['active_vocab_limit'])}")
         if ep in (1, args.phase2_epochs // 2, args.phase2_epochs) or ep % 5 == 0:
             ins_ce, ins_acc = evaluate_split(org, readout, x_seq, y_seq)
             ho_ce, ho_acc = evaluate_split(org, readout, x_ho, y_ho)
@@ -295,7 +318,24 @@ def main() -> int:
     tel = org.telemetry()
     print(f"\n[телеметрия] sync_coherence={tel['sync_coherence']:.3f} "
           f"wm_occupancy={tel['wm_occupancy']:.3f} "
-          f"hippo_stored={tel['hippo_stored']:.0f}")
+          f"hippo_stored={tel['hippo_stored']:.0f} "
+          f"son_surprise={tel.get('son_surprise', 0.0):.3f} "
+          f"astro_ca={tel.get('astro_ca', 0.0):.3f}")
+
+    if args.save:
+        ckpt = {
+            "org": org.state_dict(),
+            "readout": readout.state_dict(),
+            "itos": itos, "stoi": stoi,
+            "config": {
+                "vocab_size": vocab_size, "input_dim": vocab_size,
+                "scale": args.col_scale, "vsa_dim": args.vsa_dim,
+                "seed": args.seed,
+            },
+        }
+        torch.save(ckpt, args.save)
+        print(f"[чекпоинт] сохранён в {args.save} "
+          f"({os.path.getsize(args.save) / 1e6:.1f} МБ)")
     print("=" * 84)
     print(f"ГОТОВО за {time.perf_counter() - t_start:.1f} с ({device})")
     print("=" * 84)

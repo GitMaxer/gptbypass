@@ -44,17 +44,24 @@ class SleepProtocol:
         neuro.ne.zero_()
 
     @torch.no_grad()
-    def replay(self, columns: Iterable, hippo, neuro, batch: int = 1) -> Dict[str, float]:
+    def replay(self, columns: Iterable, hippo, neuro, batch: int = 1,
+               callosum=None) -> Dict[str, float]:
         """Приоритизированный реплей эпизодов гиппокампа через колонки.
 
         Пластичность работает, но DA = 0 (сон не захватывает случайности —
-        гомеостаз только затухает следы и w_fast релаксирует).
+        гомеостаз только затухает следы и w_fast релаксирует). В REM-хвосте
+        — химерный инсайт (Spiker v6.0): сшивка далёких эпизодов; скачок
+        межполушарной когерентности вызывает DA-импульс «Ага!» и
+        подправляет миелинизацию Callosum.
         """
+        cols = list(columns)
         xs, _ = hippo.replay_batch(max(1, self.ripple_batch))
         n_steps = self.n2 + self.n3 + self.rem
         total_spikes = 0.0
+        insights = 0.0
         for t in range(n_steps):
-            for col in columns:
+            last_l23: Dict[int, torch.Tensor] = {}
+            for i, col in enumerate(cols):
                 if xs.shape[0] > 0:
                     x = xs[t % xs.shape[0]].unsqueeze(0)
                     if x.shape[-1] == col.cfg.n_in:
@@ -66,10 +73,25 @@ class SleepProtocol:
                     s_in = torch.randn(batch, col.cfg.n_in) * 0.1 * self.sleep_input_gain
                 out = col.step(s_in, ach=torch.full((batch, 1), self.ach_sleep),
                                sltt=False, learn=True)
+                last_l23[i] = out.spikes["l23"]
                 total_spikes += float(out.spikes["l23"].sum() + out.spikes["l5"].sum())
             neuro.step()
+            # REM: химера — косинусная когерентность крайних колонок (L<->R)
+            if t >= n_steps - self.rem and len(cols) >= 2:
+                zl = last_l23[0]
+                zr = last_l23[len(cols) - 1]
+                nl = zl.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                nr = zr.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                coh = float(((zl / nl) * (zr / nr)).sum(dim=-1).mean())
+                if coh > 0.15:
+                    insight = min(1.0, max(0.0, coh))
+                    neuro.da.add_(insight).clamp_(max=1.0)
+                    if callosum is not None and hasattr(callosum, "myelin_update"):
+                        callosum.myelin_update(insight)
+                    insights = 1.0
         return {"replay_steps": float(n_steps), "replay_spikes": total_spikes,
-                "episodes": float(xs.shape[0])}
+                "episodes": float(xs.shape[0]),
+                "rem_chimera_insights": insights}
 
     @torch.no_grad()
     def consolidate(self, columns: Iterable) -> float:
@@ -101,12 +123,13 @@ class SleepProtocol:
 
     @torch.no_grad()
     def run_cycle(self, columns: Iterable, neuro, hippo,
-                  prune_threshold: float = 0.004) -> Dict[str, float]:
+                  prune_threshold: float = 0.004,
+                  callosum=None) -> Dict[str, float]:
         """Полный цикл: погружение -> реплей -> консолидация -> прунинг
         -> пробуждение."""
         cols = list(columns)
         self.enter(neuro, cols)
-        rep = self.replay(cols, hippo, neuro)
+        rep = self.replay(cols, hippo, neuro, callosum=callosum)
         rep["consolidated"] = self.consolidate(cols)
         rep["pruned"] = float(self.prune(cols, prune_threshold))
         for col in cols:

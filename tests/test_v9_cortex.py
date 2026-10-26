@@ -177,3 +177,95 @@ def test_phase1_column_loss_decreases():
     for _ in range(3):
         last = tr.train_sequence_epoch(x, y)["loss_zone_a"]
     assert last < first
+
+
+def test_wm_leak_and_structural_coherence():
+    """Фиксы sync.py: утечка слотов биндера, когерентность VSA-кодов,
+    фазовый сдвиг полушарий."""
+    org = _org()
+    org.set_phase(2)
+    org.reset_state(1)
+    x = torch.zeros(1, 24)
+    x[0, 3] = 1.0
+    out = org.step(x, learn=False)
+    assert "son" in out and "thalamus" in out
+
+    binder = org.sync.binder
+    # Leak: буфер затухает — после записи occupancy < 1.0 и продолжает падать
+    for _ in range(20):
+        org.step(x, learn=False)
+    occ_full = binder.occupancy()
+    for _ in range(60):
+        org.step(torch.zeros(1, 24), learn=False)
+    assert binder.occupancy() <= occ_full
+    assert org.sync.hemi_phase_r > 0.0  # фазовый сдвиг полушарий
+
+    # Структурная когерентность: идентичные коды -> высокая, разные -> ниже
+    d = org.sync.code_dim
+    a = torch.zeros(1, d); a[0, :4] = 1.0
+    b = torch.zeros(1, d); b[0, :4] = 1.0
+    org.sync.reset_state(1, torch.device("cpu"))
+    out_same = org.sync.step(a, b)
+    org.sync.reset_state(1, torch.device("cpu"))
+    b2 = torch.zeros(1, d); b2[0, -4:] = 1.0
+    out_diff = org.sync.step(a, b2)
+    assert float(out_same["coherence"]) > float(out_diff["coherence"])
+
+
+def test_son_thalamus_astrocyte_myelin_integrated():
+    """4-й батч аудита: SON, таламус-TRN, астроцит, миелинизация, химера."""
+    org = _org()
+    org.set_phase(2)
+    org.reset_state(2)
+    x = torch.zeros(2, 24)
+    x[:, 5] = 1.0
+    for _ in range(10):
+        out = org.step(x, learn=True)
+    # SON: surprise и bus_active в выходе; шина гейтирована
+    assert "surprise" in out["son"] and "bus_active" in out["son"]
+    assert 0.0 <= float(out["son"]["surprise"].mean()) <= 4.0
+    # Таламус: TRN-гейт ослабляет/усиливает вход
+    assert 0.4 <= float(out["thalamus"]["relay_gain"].mean()) <= 1.15
+    # Астроциты: кальцевая волна и stp_gain живут и растут на активности
+    for n in org.names:
+        a = org.astrocytes[n]
+        assert a.ca_level is not None
+        assert org._astro_gains[n].shape[1] == org.cfg.col(n).n_l23
+        assert float(a.ca_level.mean()) >= 0.0
+    # Адаптивная миелинизация включена и обучается
+    assert org.callosum.adaptive_myelination
+    org.callosum.myelin_update(0.5)
+    assert float(org.callosum.myelin_fwd.abs().sum()) > 0
+    # Химерный REM: ключ инсайта в отчёте сна
+    rep = org.sleep_cycle()
+    assert "rem_chimera_insights" in rep
+    # BG получает surprise: повышение порога на непредсказанном контексте
+    bg = org.basal_ganglia
+    bg.reset_state(1)
+    logits = torch.zeros(1, 24); logits[0, 0] = 4.0
+    thr_new = float(bg(logits, surprise_level=torch.ones(1, 1))["threshold"])
+    bg.reset_state(1)
+    thr_calm = float(bg(logits)["threshold"])
+    assert thr_new > thr_calm
+
+
+def test_development_and_profiler():
+    """Онтогенез (curriculum) + FastLoopProfiler."""
+    from neuroweave9.organism.development import DevelopmentalController
+    from neuroweave9.runtime import FastLoopProfiler
+    dev = DevelopmentalController(vocab_stages=[8, 16, 24],
+                                  seq_len_stages=[4, 8, 16],
+                                  mastery_accuracy_threshold=0.3,
+                                  min_steps_per_stage=1)
+    assert dev.active_vocab_limit == 8
+    tok = torch.arange(24)
+    assert int(dev.clamp_tokens(tok).max()) <= 7
+    st = dev.observe_performance(0.9, 1.0)
+    assert st["promoted"] == 1.0 and dev.active_vocab_limit == 16
+
+    prof = FastLoopProfiler()
+    for _ in range(3):
+        with prof.section("columns"):
+            pass
+    rep = prof.report()
+    assert "columns_ms" in rep and rep["columns_pct"] > 0

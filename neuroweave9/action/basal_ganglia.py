@@ -52,6 +52,7 @@ class BasalGangliaGate(nn.Module):
         serotonin_5ht: Optional[torch.Tensor] = None,
         ach_level: Optional[torch.Tensor] = None,
         orexin_level: Optional[torch.Tensor] = None,
+        surprise_level: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         batch_size = workspace_logits.shape[0]
         device = workspace_logits.device
@@ -88,6 +89,11 @@ class BasalGangliaGate(nn.Module):
         if ach_level is not None:
             ach_pos = torch.relu(ach_level.detach().mean(dim=-1, keepdim=True)).clamp(0.0, 1.0)
             mod_factor = mod_factor + self.alpha_ach * ach_pos
+        if surprise_level is not None:
+            # «Это ново?» от SON: непредсказанный контекст — сеть подождёт,
+            # пока БГ накопит различительный сигнал (режим выбора, не аргмакс).
+            surp = surprise_level.detach().mean(dim=-1, keepdim=True).clamp(0.0, 2.0)
+            mod_factor = mod_factor + 0.25 * surp
 
         threshold = (self.base_threshold * mod_factor).clamp(min=0.20, max=5.0)
 

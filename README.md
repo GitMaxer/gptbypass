@@ -68,15 +68,35 @@ pytest tests/                     # 36 тестов: v8 ядро/организ�
 ### Структура `neuroweave9/`
 
 - `memory/laplace.py` — LaplaceTimingBank (порт)
-- `action/basal_ganglia.py` — BasalGangliaGate (порт)
+- `action/basal_ganglia.py` — BasalGangliaGate (порт; порог ↓ от орексина,
+  ↑ от SON-surprise)
 - `modulation/pacemaker.py` — ThetaGammaOscillator (порт)
-- `cortex/sync.py` — HemisphereSync: общий θ-γ биндер + VSA-фрейм
+- `modulation/orexin.py` — OrexinInteroceptiveLoop (энергия/цель → drive)
+- `modulation/no_field.py` — NitricOxideField (объёмная передача NO)
+- `modulation/son.py` — SonBus: самонаблюдение + авторегрессионный
+  surprise «это ново?» (порт)
+- `topology/thalamus.py` — Thalamus + TRN: сенсорный гейт и сонные веретёна
+- `cortex/astrocyte.py` — TripartiteAstrocyte: 3-я шкала памяти
+  (Ca2+ ~ 2500 мс, глиотрансмиттер → STP-фасилитация L2/3)
+- `cortex/sync.py` — HemisphereSync: общий θ-γ биндер (со слотовой
+  утечкой) + VSA-фрейм; когерентность по VSA-наполнителям, фазовый
+  сдвиг полушарий
 - `cortex/organism.py` — CortexOrganism (контракт совместим с Spiker)
+- `organism/development.py` — DevelopmentalController: curriculum по
+  EMA-мастерству
 - `learning/phase1.py` — Phase1ColumnTrainer + CortexEWC
 - `readout.py` — LaplaceContextReadout (+ канал синхронизации)
-- `train_cortex.py` — пайплайн «одной большой партии»
+- `train_cortex.py` — пайплайн «одной большой партии» + `--save`/`--curriculum`
+- `generate.py` — генерация по чекпоинту (БГ-пейсинг эмиссии)
+- `runtime.py` — FastLoopProfiler (секционный профайлер такта)
 - `system.py` — CortexSystem (boot/step/sleep/quantize/save/load)
 - `data.py` — загрузчики TinyStories
+
+В v9 также восстановлены: STP Цодыкса-Маркрама и метапластичность Фузи
+(`neuroweave8/core/synapse.py`), 2-AG ретроградная депрессия
+(`neuroweave8/core/neuron.py`), химерный REM-инсайт и адаптивная
+миелинизация (`neuroweave8/learning/sleep.py`, `topology/callosum.py`),
+тест пола мембраны `tests/test_gaba_reversal.py`.
 
 ## Ключевые уровни v8
 

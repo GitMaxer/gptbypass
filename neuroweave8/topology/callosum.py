@@ -44,6 +44,21 @@ class CorpusCallosum(nn.Module):
         self._buf_fwd: Optional[torch.Tensor] = None
         self._buf_bwd: Optional[torch.Tensor] = None
         self._filtered: Optional[torch.Tensor] = None
+        # Адаптивная миелинизация (Spiker): обучаемые веса задержек по
+        # глубине кольцевого буфера. Инициализация — пик на максимальной
+        # задержке (контракт: до обучения лаг = delay тактов).
+        init_m = torch.full((self.delay, self.dim_in), -10.0)
+        init_m[0, :] = 10.0
+        self.register_buffer("myelin_fwd", init_m.clone())
+        init_m2 = torch.full((self.delay, self.dim_out), -10.0)
+        init_m2[0, :] = 10.0
+        self.register_buffer("myelin_bwd", init_m2.clone())
+        self.adaptive_myelination: bool = False
+
+    def enable_adaptive_myelination(self, on: bool = True) -> None:
+        """Включить мягкое смешивание задержек: задержанный пакет =
+        softmax(myelin)-взвешенная сумма слотов кольца (обучаемый лаг)."""
+        self.adaptive_myelination = bool(on)
 
     def reset_state(self, batch: int, device, dtype=torch.float32) -> None:
         self._buf_fwd = torch.zeros(self.delay, batch, self.dim_in, device=device, dtype=dtype)
@@ -63,8 +78,20 @@ class CorpusCallosum(nn.Module):
         """Один такт: вернуть (доставленное fwd, доставленное bwd)."""
         self._ensure(m_fwd, m_bwd)
         # чтение ДО записи в тот же слот — копия через index_select (патч S7)
-        out_fwd = self._buf_fwd.index_select(0, self._ptr)[0]
-        out_bwd = self._buf_bwd.index_select(0, self._ptr)[0]
+        if self.adaptive_myelination and self.delay > 1:
+            # Миелинизация: мягкий выбор лага — от самого старого (ptr,
+            # лаг=delay) к самому новому (ptr-1, лаг=1).
+            idx = [(int(self._ptr.item()) + k) % self.delay
+                   for k in range(self.delay)]
+            ord_f = self._buf_fwd[idx]            # [D, B, dim_in]
+            ord_b = self._buf_bwd[idx]            # [D, B, dim_out]
+            w_f = torch.softmax(self.myelin_fwd, dim=0).unsqueeze(1)
+            w_b = torch.softmax(self.myelin_bwd, dim=0).unsqueeze(1)
+            out_fwd = (ord_f * w_f).sum(dim=0)
+            out_bwd = (ord_b * w_b).sum(dim=0)
+        else:
+            out_fwd = self._buf_fwd.index_select(0, self._ptr)[0]
+            out_bwd = self._buf_bwd.index_select(0, self._ptr)[0]
         self._buf_fwd.index_copy_(0, self._ptr, m_fwd.detach().unsqueeze(0))
         self._buf_bwd.index_copy_(0, self._ptr, m_bwd.detach().unsqueeze(0))
         self._ptr.copy_((self._ptr + 1) % self.delay)
@@ -87,6 +114,18 @@ class CorpusCallosum(nn.Module):
                                            filtered.detach()) / max(1, delivered.shape[0])
         w.add_(delta * m)
         w.clamp_(-amp, amp)
+
+    @torch.no_grad()
+    def myelin_update(self, insight_da: float, lr: float = 0.01) -> None:
+        """Обучение задержек: REM-инсайт сдвигает миелиновые логиты к лагам,
+        давшим когерентный мост (простая политика направления — по одному
+        шагу к более короткому лагу на единицу инсайта)."""
+        g = float(insight_da)
+        if g <= 0.0:
+            return
+        grad = torch.linspace(0.0, 1.0, self.delay).unsqueeze(-1)
+        self.myelin_fwd.add_(lr * g * grad)
+        self.myelin_bwd.add_(lr * g * grad)
 
     @property
     def traffic(self) -> float:

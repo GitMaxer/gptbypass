@@ -264,6 +264,7 @@ class LaminarColumn(nn.Module):
         sltt: bool = False,
         learn: bool = False,
         generator: Optional[torch.Generator] = None,
+        astro_gain: Optional[torch.Tensor] = None,
     ) -> ColumnOut:
         """Один такт колонки.
 
@@ -296,6 +297,10 @@ class LaminarColumn(nn.Module):
 
         # ---- L2/3: локальная рекуррентность ----------------------------
         drive23 = self.syn["4_23"](self.prev["l4"]) + self.syn["rec"](self.prev["l23"])
+        if astro_gain is not None:
+            # Астроцитарная STP-фасилитация (глиотрансмиттер): удержание
+            # активного семантического ансамбля на секундном горизонте.
+            drive23 = drive23 * astro_gain
         gaba23 = F.linear(pv_prev, self.w_pv_23) if pv_prev is not None else None
         o23 = self.pools["l23"].step(drive23, None, gaba23, ach=ach, ht=ht,
                                      ne_rise=ne_rise, sltt=sltt, k_spike=self._k["l23"],

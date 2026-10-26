@@ -57,6 +57,9 @@ from ..action.basal_ganglia import BasalGangliaGate
 from ..modulation.pacemaker import ThetaGammaOscillator
 from ..modulation.orexin import OrexinInteroceptiveLoop
 from ..modulation.no_field import NitricOxideField
+from ..modulation.son import SonBus
+from ..topology.thalamus import Thalamus
+from .astrocyte import TripartiteAstrocyte
 from .sync import HemisphereSync
 
 
@@ -151,6 +154,16 @@ class CortexOrganism(nn.Module):
         # Порты Spiker v7.0: орексиновый интероцептивный контур и NO-поле
         self.orexin = OrexinInteroceptiveLoop(dt=dt)
         self.no_field = NitricOxideField(num_neurons=self.cfg.col("C").n_l23, dt=dt)
+        # Порты Spiker v5.0/v6.0 (4-й батч аудита): таламус-TRN, астроциты,
+        # SON-самонаблюдение и адаптивная миелинизация Callosum.
+        self.thalamus = Thalamus(self.input_dim, dt=dt)
+        self.astrocytes = nn.ModuleDict({
+            n: TripartiteAstrocyte(self.cfg.col(n).n_l23, dt=dt)
+            for n in self.names})
+        self.son = SonBus(zone_size=self.cortical_dim(), dt=dt)
+        self.callosum.enable_adaptive_myelination(True)
+        self._son_surprise: Optional[torch.Tensor] = None
+        self._astro_gains: Optional[Dict[str, torch.Tensor]] = None
         # STP Цодыкса-Маркрама на рекуррентности L2/3 — рабочая память
         for col in self.columns.values():
             if "rec" in col.syn:
@@ -223,6 +236,12 @@ class CortexOrganism(nn.Module):
         self.basal_ganglia.reset_state(batch_size, dev)
         self.orexin.reset_state(batch_size, dev)
         self.no_field.reset_state(batch_size, dev)
+        self.son.reset_state(batch_size, dev)
+        self.thalamus.reset_state(batch_size, dev)
+        for a in self.astrocytes.values():
+            a.reset_state(batch_size, dev)
+        self._son_surprise = None
+        self._astro_gains = None
         self._last_activity = torch.zeros(batch_size, 1, device=dev)
         self.hippo.reset_state(dev)
         self.oscillator.reset_state(dev)
@@ -311,8 +330,20 @@ class CortexOrganism(nn.Module):
                             for n in self.names], device=dev)
         att = self.infer.gains(comp, nov)
 
-        # 4. Такт колонок (в Фазе 1 — sltt для суррогатного градиента)
-        inputs = self._column_inputs(token_input)
+        # 3b. Таламус-TRN: сенсорный гейт. Surprise предыдущего такта и
+        #     осциллятор модулируют пропускание входа в кору.
+        z_a0 = self.neuro.index["A"]
+        thal = self.thalamus(
+            token_input,
+            surprise=self._son_surprise,
+            ach_level=self.neuro.ach[z_a0],
+            ne_level=self.neuro.ne[z_a0],
+            oscillator_gain=gate)
+        relayed_input = thal["relayed_input"]
+
+        # 4. Такт колонок (в Фазе 1 — sltt для суррогатного градиента);
+        #    астроцитарный stp_gain — медленная фасилитация L2/3.
+        inputs = self._column_inputs(relayed_input)
         outs: Dict[str, object] = {}
         sltt = (self.phase == 1)
         for i, n in enumerate(self.names):
@@ -323,7 +354,9 @@ class CortexOrganism(nn.Module):
                 arousal=att[i].view(1, 1).expand(B, self.cfg.col(n).n_l5),
                 ach=self.neuro.ach[z], ht=self.neuro.ht[z],
                 ne_rise=self._ne_rise_prev[z],
-                sltt=sltt, learn=learn)
+                sltt=sltt, learn=learn,
+                astro_gain=(self._astro_gains.get(n)
+                            if self._astro_gains else None))
 
         # 5. NE-алармы: транзиент surprise -> фазический выброс
         for n in self.names:
@@ -355,6 +388,22 @@ class CortexOrganism(nn.Module):
                                   outs["C"].spikes["l23"].detach())
         no_out = self.no_field.step(outs["C"].spikes["l23"].detach())
 
+        # 8b. SON-самонаблюдение над объединённой L2/3 корой — «это ново?»
+        #     и астроцитарный Ca2+-контур: stp_gain следующего такта.
+        cortical = torch.cat([outs[n].spikes["l23"] for n in self.names],
+                             dim=-1)
+        z_export, _apictx, son_surprise, _mloss, bus_mask = self.son(
+            cortical, sltt_mode=sltt)
+        self._son_surprise = son_surprise
+        self._astro_gains = {}
+        for n in self.names:
+            z = self.neuro.index[n]
+            ao = self.astrocytes[n].step(
+                outs[n].spikes["l23"],
+                ne_level=self.neuro.ne[z],
+                ach_level=self.neuro.ach[z])
+            self._astro_gains[n] = ao["stp_gain"].detach()
+
         # 9. Workspace: конкуренция зон -> fused логиты
         logits_a = self.columns["A"].logits()
         logits_b = self.columns["B"].logits()
@@ -384,7 +433,8 @@ class CortexOrganism(nn.Module):
             fused,
             serotonin_5ht=self.neuro.ht[z_a],
             ach_level=self.neuro.ach[z_a],
-            orexin_level=orexin_out["orexin"])
+            orexin_level=orexin_out["orexin"],
+            surprise_level=son_surprise)
 
         # 12. Химия + медленный контур
         info = self.neuro.step(spike_sums={
@@ -405,6 +455,13 @@ class CortexOrganism(nn.Module):
                 "sync_coherence": float(sync_out["coherence"]),
                 "wm_occupancy": float(sync_out["occupancy"]),
                 "callosum_gate": float(gate),
+                "son_surprise": float(son_surprise.mean()),
+                "son_bus_active": float(bus_mask.mean()),
+                "trn_relay_gain": float(thal["relay_gain"].mean()),
+                "astro_ca": float(torch.stack([
+                    a.ca_level.mean() for a in self.astrocytes.values()
+                    if a.ca_level is not None]).mean())
+                if self.astrocytes["A"].ca_level is not None else 0.0,
             }
             self.last_metrics = metrics
         else:
@@ -433,6 +490,9 @@ class CortexOrganism(nn.Module):
             "sync": sync_out,
             "orexin": orexin_out,
             "no_field": no_out,
+            "son": {"z_export": z_export, "surprise": son_surprise,
+                    "bus_active": bus_mask},
+            "thalamus": thal,
             "oscillator": osc,
             "metrics": metrics,
         }
@@ -440,9 +500,13 @@ class CortexOrganism(nn.Module):
     # ------------------------------------------------------------------
     @torch.no_grad()
     def sleep_cycle(self, n_steps: Optional[int] = None) -> Dict[str, float]:
+        self.thalamus.enter_sleep()
         rep = self.sleep_proto.run_cycle(
             self.columns.values(), self.neuro, self.hippo,
-            prune_threshold=self.cfg.structural.prune_threshold)
+            prune_threshold=self.cfg.structural.prune_threshold,
+            callosum=self.callosum)
+        self.thalamus.wake()
+        rep["rem_chimera_insights"] = rep.get("rem_chimera_insights", 0.0)
         if self._ewc is not None:
             self._ewc.rebaseline()
             rep["ewc_rebaselined"] = 1.0
@@ -483,6 +547,12 @@ class CortexOrganism(nn.Module):
                    wm_occupancy=float(self.sync.binder.occupancy())
                    if self.sync.binder.buf is not None else 0.0,
                    bg_emissions=float(self.basal_ganglia.total_emissions),
+                   son_surprise=(float(self._son_surprise.mean())
+                                 if self._son_surprise is not None else 0.0),
+                   astro_ca=float(torch.stack([
+                       a.ca_level.mean() for a in self.astrocytes.values()
+                       if a.ca_level is not None]).mean())
+                   if self.astrocytes["A"].ca_level is not None else 0.0,
                    **{f"orexin_{k}": v for k, v in self.orexin.state_summary().items()})
         return tel
 

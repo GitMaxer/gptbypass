@@ -62,6 +62,13 @@ class HemisphereSync(nn.Module):
             for p in (self.proj_l, self.proj_r):
                 p.weight.mul_(2.0 / math.sqrt(code_dim))
                 p.bias.zero_()
+        # Фазовый сдвиг полушарий: правое кодирует в отставшей фазе θ-цикла
+        # (половина γ-слота ~ задержка проведения Callosum). Связывание
+        # учитывает его через расширенный ключ role_R * phase_R.
+        self.hemi_phase_r = math.pi / max(1, n_slots)
+        self.register_buffer(
+            "phase_r", torch.polar(torch.ones(1),
+                                   torch.tensor([self.hemi_phase_r])))
         self.frame: Optional[torch.Tensor] = None
         self.coherence = 0.0
 
@@ -95,10 +102,21 @@ class HemisphereSync(nn.Module):
         r = torch.sigmoid(self.proj_r(right_code.detach()))
         enc_l = self.vsa.encode_pattern(l.clamp(1e-4, 1 - 1e-4).gt(0.5).float(),
                                         role_idx=0)
-        enc_r = self.vsa.encode_pattern(r.clamp(1e-4, 1 - 1e-4).gt(0.5).float(),
-                                        role_idx=1)
+        # Правое полушарие: собственная роль + фазовый сдвиг на полслота
+        enc_r = (self.vsa.encode_pattern(
+            r.clamp(1e-4, 1 - 1e-4).gt(0.5).float(), role_idx=1)
+            * self.phase_r)
         self.frame = self.vsa.bundle([enc_l, enc_r])
-        self.coherence = float(F.cosine_similarity(l, r, dim=-1).mean())
+
+        # Когерентность между VSA-НАПОЛНИТЕЛЯМИ (содержанием), а не между
+        # проекциями: развязываем каждый код его ключом (роль x фаза) и
+        # сравниваем чистые фазовые векторы — это структурная, а не
+        # сигнальная согласованность полушарий.
+        key_r = self.vsa.role(1) * self.phase_r
+        fill_l = self.vsa.unbind(enc_l, self.vsa.role(0))
+        fill_r = self.vsa.unbind(enc_r, key_r)
+        coh = (fill_l * torch.conj(fill_r)).real.mean(dim=-1)
+        self.coherence = float(coh.mean())
         strength = float(self.frame.real.pow(2).mean())
 
         return {

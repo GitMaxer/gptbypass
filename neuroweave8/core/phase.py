@@ -63,6 +63,10 @@ class ThetaGammaBinder(nn.Module):
         self.n_units = int(n_units)
         self.n_slots = int(cfg.n_slots)
         self.gamma_ticks = int(cfg.gamma_ticks)
+        # Утечка рабочей памяти (Poirazi/Fusi): содержимое слотов затухает
+        # на каждой записи — без этого буфер никогда не очищается и
+        # occupancy залипает на 1.0. tau ~ n_slots*20 тактов.
+        self.leak_decay = float(getattr(cfg, "wm_leak_decay", 0.985))
         self.buf: Optional[torch.Tensor] = None      # [B, K, N]
         self.slot = 0
         self.theta_phase = 0.0
@@ -85,8 +89,10 @@ class ThetaGammaBinder(nn.Module):
         """Записать паттерн в слот (роль). Переполнение = алиасинг."""
         self._ensure(spikes)
         k = self.slot if role is None else int(role) % self.n_slots
-        if role is None and self.buf[:, k, :].abs().sum() > 0:
+        if role is None and self.buf[:, k, :].abs().sum() > 0.05:
             self.alias_events += 1
+        # Затухание всех слотов (leak): старый контент тускнеет со временем.
+        self.buf.mul_(self.leak_decay)
         self.buf[:, k, :].add_(spikes.detach())
         if role is None:
             self.advance()
@@ -118,8 +124,9 @@ class ThetaGammaBinder(nn.Module):
         self.buf[:, int(role) % self.n_slots, :] = 0.0
 
     def occupancy(self) -> float:
-        """Доля заполненных слотов (телеметрия рабочей памяти)."""
-        used = (self.buf.abs().sum(-1) > 0).float().mean()
+        """Доля заполненных слотов (телеметрия рабочей памяти).
+        Порог 0.05: протухшее (утёкшее) содержимое слот освобождает."""
+        used = (self.buf.abs().sum(-1) > 0.05).float().mean()
         return float(used)
 
     def readout(self) -> torch.Tensor:
